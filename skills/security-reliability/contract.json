@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0",
+  "name": "security-reliability",
+  "version": "1.0.0",
+  "kind": "analysis",
+  "summary": "Repository-grounded threat modeling and reliability review: assets, trust boundaries, prioritized controls, strict secret-handling and approval boundaries.",
+  "triggers": [
+    "security review",
+    "threat model",
+    "is this secure",
+    "reliability review",
+    "secret scan",
+    "what are the risks"
+  ],
+  "inputs": {
+    "repositoryPath": { "type": "string", "required": true },
+    "scopeHint": { "type": "string", "required": false, "description": "Subsystem, endpoint, or data flow to prioritize." }
+  },
+  "outputs": {
+    "type": "object",
+    "required": ["assets", "trustBoundaries", "findings", "prioritizedControls", "residualRisk"]
+  },
+  "toolsUsed": [
+    "sdlc_secret_scan",
+    "sdlc_repo_snapshot",
+    "sdlc_search_code",
+    "sdlc_dependency_inventory",
+    "sdlc_risk_score"
+  ],
+  "safety": {
+    "readOnlyByDefault": true,
+    "requiresApprovalFor": ["any verification step that changes state", "contacting external services"],
+    "neverDoes": ["access or print secret values", "treat scanners as proof of absence", "recommend control bypasses to speed delivery"]
+  },
+  "evalPrompts": ["tests.md"]
+}

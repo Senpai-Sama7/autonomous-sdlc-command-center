@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "1.0",
+  "name": "change-governance",
+  "version": "1.0.0",
+  "kind": "governance",
+  "summary": "Plan and review consequential changes (migrations, upgrades, infra, config, refactors, releases) with blast radius, approvals, rollout, verification, rollback, and audit-ready evidence.",
+  "triggers": [
+    "plan this migration",
+    "review this change",
+    "blast radius",
+    "rollout plan",
+    "dependency upgrade",
+    "is this change safe"
+  ],
+  "inputs": {
+    "repositoryPath": { "type": "string", "required": true },
+    "changeDescription": { "type": "string", "required": true },
+    "environment": { "type": "string", "required": false }
+  },
+  "outputs": {
+    "type": "object",
+    "required": ["riskLevel", "preconditions", "approvalRequired", "rollout", "verification", "abortCriteria", "rollback", "residualRisk"]
+  },
+  "toolsUsed": [
+    "sdlc_repo_snapshot",
+    "sdlc_risk_score",
+    "sdlc_search_code",
+    "sdlc_write_file",
+    "sdlc_replace_in_file",
+    "sdlc_list_changes",
+    "sdlc_rollback",
+    "sdlc_audit_log"
+  ],
+  "safety": {
+    "readOnlyByDefault": true,
+    "requiresApprovalFor": ["applying any planned change", "executing rollback", "irreversible steps"],
+    "neverDoes": ["blur a proposed plan with an authorized action", "skip rollback definition", "hide deviations from the approved plan"]
+  },
+  "evalPrompts": ["tests.md"]
+}

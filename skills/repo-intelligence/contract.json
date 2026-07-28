@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "1.0",
+  "name": "repo-intelligence",
+  "version": "1.0.0",
+  "kind": "analysis",
+  "summary": "Build a concise, evidence-backed map of an unfamiliar codebase: entry points, dependencies, data flows, delivery controls, ownership signals, and maintenance risks.",
+  "triggers": [
+    "explain this codebase",
+    "where do I start",
+    "architecture map",
+    "what does this repo do",
+    "find the risky parts"
+  ],
+  "inputs": {
+    "repositoryPath": { "type": "string", "required": true },
+    "depth": { "type": "string", "required": false, "enum": ["quick", "standard", "deep"], "description": "Inventory breadth vs. targeted file reads." }
+  },
+  "outputs": {
+    "type": "object",
+    "required": ["architecture", "entryPoints", "dependencies", "interfaces", "qualityGates", "hotspots", "unknowns"]
+  },
+  "toolsUsed": [
+    "sdlc_repo_snapshot",
+    "sdlc_language_stats",
+    "sdlc_dependency_inventory",
+    "sdlc_git_history",
+    "sdlc_search_code",
+    "sdlc_read_file"
+  ],
+  "safety": {
+    "readOnlyByDefault": true,
+    "requiresApprovalFor": [],
+    "neverDoes": ["claim a file was inspected when it was not", "execute repository code", "print secret values"]
+  },
+  "evalPrompts": ["tests.md"]
+}

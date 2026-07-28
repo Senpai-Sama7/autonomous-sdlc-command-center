@@ -1,0 +1,4 @@
+interface:
+  display_name: "Performance and Reliability"
+  short_description: "Measure bottlenecks and protect reliability."
+  default_prompt: "Use $performance-reliability to investigate this performance regression."

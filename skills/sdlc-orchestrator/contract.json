@@ -1,0 +1,44 @@
+{
+  "schemaVersion": "1.0",
+  "name": "sdlc-orchestrator",
+  "version": "1.0.0",
+  "kind": "orchestration",
+  "summary": "Entry point for broad engineering requests. Classifies work, runs read-only discovery first, routes to the narrowest matching skill, and enforces approval gates before any mutation.",
+  "triggers": [
+    "map this repository",
+    "diagnose this failure",
+    "assess this change",
+    "release readiness",
+    "engineering risk review",
+    "what should I work on next"
+  ],
+  "inputs": {
+    "repositoryPath": { "type": "string", "required": true, "description": "Local repository or project directory." },
+    "requestedOutcome": { "type": "string", "required": true },
+    "constraints": { "type": "string", "required": false, "description": "Environment, change freeze, or destructive-action boundaries." }
+  },
+  "outputs": {
+    "type": "object",
+    "required": ["status", "scope", "evidence", "findings", "confidence", "recommendedNextAction", "approvalRequired", "verification", "rollback", "residualRisk"]
+  },
+  "toolsUsed": [
+    "sdlc_repo_snapshot",
+    "sdlc_language_stats",
+    "sdlc_dependency_inventory",
+    "sdlc_git_history",
+    "sdlc_secret_scan",
+    "sdlc_risk_score",
+    "sdlc_release_readiness",
+    "sdlc_doctor",
+    "sdlc_write_file",
+    "sdlc_replace_in_file",
+    "sdlc_rollback",
+    "sdlc_audit_log"
+  ],
+  "safety": {
+    "readOnlyByDefault": true,
+    "requiresApprovalFor": ["file mutations", "publishing", "deployment", "credential use", "external communication", "rollback execution"],
+    "neverDoes": ["print secret values", "infer production safety from green tests", "merge or deploy without explicit authorization", "guess when evidence is missing"]
+  },
+  "evalPrompts": ["tests.md"]
+}

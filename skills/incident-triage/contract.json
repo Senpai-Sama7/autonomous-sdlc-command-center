@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1.0",
+  "name": "incident-triage",
+  "version": "1.0.0",
+  "kind": "response",
+  "summary": "Safety-first triage of service failures and degradation: stabilize impact, preserve evidence, rank hypotheses, and gate every production mutation behind approval.",
+  "triggers": [
+    "production down",
+    "error spike",
+    "incident",
+    "service degraded",
+    "site is slow",
+    "outage"
+  ],
+  "inputs": {
+    "repositoryPath": { "type": "string", "required": false },
+    "symptom": { "type": "string", "required": true },
+    "startTime": { "type": "string", "required": false },
+    "recentChanges": { "type": "string", "required": false }
+  },
+  "outputs": {
+    "type": "object",
+    "required": ["severity", "impact", "timeline", "confirmedEvidence", "rankedHypotheses", "mitigationOptions", "approvalRequired", "nextCheckpoint"]
+  },
+  "toolsUsed": [
+    "sdlc_repo_snapshot",
+    "sdlc_git_history",
+    "sdlc_search_code",
+    "sdlc_doctor",
+    "sdlc_release_readiness"
+  ],
+  "safety": {
+    "readOnlyByDefault": true,
+    "requiresApprovalFor": ["production writes", "rollback", "restart", "traffic shift", "external notification"],
+    "neverDoes": ["claim root cause before alternatives are excluded", "change state before preserving evidence", "print secret values from logs"]
+  },
+  "evalPrompts": ["tests.md"]
+}

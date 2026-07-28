@@ -1,0 +1,4 @@
+interface:
+  display_name: "Change Governance"
+  short_description: "Plan safe, auditable engineering changes."
+  default_prompt: "Use $change-governance to assess this proposed production change."

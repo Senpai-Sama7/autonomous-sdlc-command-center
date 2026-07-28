@@ -1,0 +1,35 @@
+{
+  "schemaVersion": "1.0",
+  "name": "ci-release",
+  "version": "1.0.0",
+  "kind": "delivery",
+  "summary": "Diagnose build/CI failures and assess release readiness with a minimal, reversible verification plan and explicit evidence boundaries.",
+  "triggers": [
+    "ci failure",
+    "build is red",
+    "release readiness",
+    "can we ship",
+    "diagnose this pipeline"
+  ],
+  "inputs": {
+    "repositoryPath": { "type": "string", "required": true },
+    "failureEvidence": { "type": "string", "required": false, "description": "CI log excerpt or failing check name, if available." }
+  },
+  "outputs": {
+    "type": "object",
+    "required": ["symptom", "firstFailingBoundary", "likelyCause", "confirmingEvidence", "smallestFix", "regressionTest", "rollbackCondition", "notVerified", "approvalRequired"]
+  },
+  "toolsUsed": [
+    "sdlc_release_readiness",
+    "sdlc_repo_snapshot",
+    "sdlc_search_code",
+    "sdlc_risk_score",
+    "sdlc_dependency_inventory"
+  ],
+  "safety": {
+    "readOnlyByDefault": true,
+    "requiresApprovalFor": ["publishing artifacts", "rerunning or modifying pipelines", "weakening quality gates"],
+    "neverDoes": ["retry blindly", "suppress a failing check", "claim remote CI state from local evidence", "print secret values from logs"]
+  },
+  "evalPrompts": ["tests.md"]
+}

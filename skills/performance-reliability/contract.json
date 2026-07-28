@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "1.0",
+  "name": "performance-reliability",
+  "version": "1.0.0",
+  "kind": "analysis",
+  "summary": "Investigate latency, throughput, resource, and scalability regressions through measurement, bottleneck isolation, and guarded one-change-at-a-time optimization.",
+  "triggers": [
+    "slow",
+    "latency",
+    "performance regression",
+    "throughput",
+    "memory leak",
+    "optimize"
+  ],
+  "inputs": {
+    "repositoryPath": { "type": "string", "required": true },
+    "symptom": { "type": "string", "required": true, "description": "Measurable symptom with baseline and target if known." },
+    "workloadShape": { "type": "string", "required": false }
+  },
+  "outputs": {
+    "type": "object",
+    "required": ["baseline", "measurementMethod", "bottleneckEvidence", "changeProposal", "expectedTradeoff", "verification", "rollbackTrigger"]
+  },
+  "toolsUsed": [
+    "sdlc_repo_snapshot",
+    "sdlc_search_code",
+    "sdlc_language_stats",
+    "sdlc_read_file",
+    "sdlc_write_file",
+    "sdlc_rollback"
+  ],
+  "safety": {
+    "readOnlyByDefault": true,
+    "requiresApprovalFor": ["applying optimizations", "load generation against shared environments"],
+    "neverDoes": ["optimize from intuition alone", "bundle multiple changes into one measurement", "hide unmeasured production risk"]
+  },
+  "evalPrompts": ["tests.md"]
+}

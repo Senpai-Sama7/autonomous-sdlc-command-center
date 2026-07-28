@@ -1,0 +1,32 @@
+{
+  "name": "autonomous-sdlc-command-center",
+  "version": "1.1.0",
+  "description": "A local-first, safety-gated control plane for repository intelligence, incident triage, delivery readiness, gated writes with rollback, and engineering risk review.",
+  "author": {
+    "name": "Local developer"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Autonomous Sdlc Command Center",
+    "shortDescription": "Evidence-backed engineering control workflows.",
+    "longDescription": "Maps repositories, diagnoses failures, measures release readiness, scans for leaked secrets, scores delivery risk, and applies approval-gated changes with backup, rollback, and a tamper-evident audit log.",
+    "developerName": "Local developer",
+    "category": "Productivity",
+    "capabilities": [
+      "Read-only diagnostics",
+      "Release readiness",
+      "Secret scanning with redaction",
+      "Composite risk scoring",
+      "Approval-gated writes with rollback",
+      "Tamper-evident audit log",
+      "Batch file reads",
+      "Bounded directory tree",
+      "Per-tool rate limiting"
+    ],
+    "defaultPrompt": [
+      "Map this repository and identify the highest-impact delivery risks.",
+      "Diagnose this CI failure with evidence and a minimal verification plan.",
+      "Assess this change for security, reliability, and release readiness."
+    ]
+  }
+}

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Incident Triage"
+  short_description: "Investigate and stabilize service incidents."
+  default_prompt: "Use $incident-triage to triage this operational failure."
