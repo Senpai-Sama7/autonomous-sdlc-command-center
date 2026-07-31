@@ -798,6 +798,86 @@ def _():
             thread.join(timeout=10)
 
 
+# ----------------------------------------------------------- Dashboard
+
+
+@test("Dashboard: HTML page and API endpoints")
+def _():
+    import sdlc_dashboard
+
+    server = sdlc_dashboard.create_dashboard_server("127.0.0.1", 0, str(ROOT))
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        with urllib.request.urlopen(f"{base}/", timeout=10) as response:
+            html = response.read().decode("utf-8")
+            assert response.headers.get("Content-Type", "").startswith("text/html")
+        assert "SDLC Command Center" in html
+        assert "/api/" in html, "dashboard JS must call the API"
+
+        with urllib.request.urlopen(f"{base}/health", timeout=10) as response:
+            health = json.loads(response.read().decode("utf-8"))
+        assert health["status"] == "ok"
+
+        with urllib.request.urlopen(f"{base}/api/status", timeout=10) as response:
+            status = json.loads(response.read().decode("utf-8"))
+        assert status["toolCount"] == EXPECTED_TOOL_COUNT
+        assert len(status["tools"]) == EXPECTED_TOOL_COUNT
+        assert all(t["name"].startswith("sdlc_") for t in status["tools"])
+
+        for endpoint in ("risk", "readiness", "audit", "shadows", "languages", "doctor"):
+            with urllib.request.urlopen(f"{base}/api/{endpoint}", timeout=30) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            assert payload.get("status") in {"ok", "pass", "warning", "fail", "blocked", "error", "needs-review"}, (
+                f"/api/{endpoint} returned unexpected payload: {str(payload)[:200]}"
+            )
+
+        # Unknown endpoint must 404 with JSON error
+        try:
+            urllib.request.urlopen(f"{base}/api/nope", timeout=10)
+            raise AssertionError("expected 404 for unknown endpoint")
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 404
+            err = json.loads(exc.read().decode("utf-8"))
+            assert err["status"] == "error"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+
+
+@test("Dashboard: never mutates the workspace")
+def _():
+    import sdlc_dashboard
+
+    with tempfile.TemporaryDirectory() as root:
+        server = sdlc_dashboard.create_dashboard_server("127.0.0.1", 0, root)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{port}"
+        try:
+            for endpoint in ("status", "risk", "readiness", "audit", "shadows", "languages", "doctor"):
+                urllib.request.urlopen(f"{base}/api/{endpoint}", timeout=30).read()
+            leftovers = [p for p in Path(root).rglob("*") if p.name != ".sdlc"]
+            audit_dir = Path(root) / ".sdlc"
+            writes = list(audit_dir.rglob("*.jsonl")) if audit_dir.is_dir() else []
+            assert not leftovers, f"dashboard created files: {leftovers}"
+            assert not writes, f"dashboard wrote audit entries: {writes}"
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=10)
+
+
+@test("Dashboard: CLI rejects invalid port")
+def _():
+    code, _, stderr = run_cli("dashboard", "--port", "70000")
+    assert code == 2, f"expected exit 2 for invalid port, got {code}: {stderr[:200]}"
+
+
 # ----------------------------------------------------------- Auth
 
 

@@ -140,6 +140,12 @@ def _parser() -> argparse.ArgumentParser:
     config_sub.add_parser("init", help="Create a default sdlc.config.json in the workspace")
     config_sub.add_parser("validate", help="Validate the current sdlc.config.json")
 
+    p = sub.add_parser("dashboard", help="Launch the read-only web dashboard (localhost HTTP)")
+    _add_path(p)
+    p.add_argument("--port", type=int, default=8420, help="Dashboard port (default: 8420)")
+    p.add_argument("--host", default="127.0.0.1", help="Dashboard bind host (default: 127.0.0.1)")
+    p.add_argument("--open", action="store_true", help="Open the dashboard in the default browser")
+
     return parser
 
 
@@ -587,6 +593,21 @@ def main() -> int:
 
     if args.command == "config":
         return _handle_config(args)
+
+    if args.command == "dashboard":
+        try:
+            from sdlc_dashboard import run_dashboard
+        except ImportError:
+            print(json.dumps({"status": "error", "error": "dashboard module unavailable"}, separators=(",", ":")), file=sys.stderr)
+            return 3
+        try:
+            return run_dashboard(args.host, args.port, args.path, open_browser=args.open)
+        except ValueError as exc:
+            print(json.dumps({"status": "error", "error": str(exc)}, separators=(",", ":")), file=sys.stderr)
+            return 2
+        except OSError as exc:
+            print(json.dumps({"status": "error", "error": f"cannot bind {args.host}:{args.port} ({exc})"}, separators=(",", ":")), file=sys.stderr)
+            return 3
 
     try:
         result = _HANDLERS[args.command](_build_arguments(args.command, args))

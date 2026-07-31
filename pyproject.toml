@@ -22,5 +22,5 @@ sdlc-mcp = "sdlc_mcp_server:main"
 sdlc = "sdlc_cli:main"
 
 [tool.setuptools]
-py-modules = ["sdlc_core", "sdlc_analyze", "sdlc_write", "sdlc_cli", "sdlc_mcp_server", "sdlc_extensions", "sdlc_shadow", "sdlc_config"]
+py-modules = ["sdlc_core", "sdlc_analyze", "sdlc_write", "sdlc_cli", "sdlc_mcp_server", "sdlc_extensions", "sdlc_shadow", "sdlc_config", "sdlc_dashboard"]
 package-dir = {"" = "mcp"}

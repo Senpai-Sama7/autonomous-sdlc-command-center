@@ -37,6 +37,8 @@ The tool answers these questions about any software project:
 - **Bearer Token Authentication** — OAuth 2.0 Bearer token auth for remote HTTP deployments. Token auto-generated on first run, rotatable via CLI
 - **Configuration Engine** — `sdlc.config.json` for tunable security, mutation, auth, and HTTP settings with schema-validated defaults
 - **CLI `auth` and `config` commands** — `sdlc auth rotate/status/token` and `sdlc config show/init/validate`
+- **Web Dashboard** — `sdlc dashboard` launches a zero-dependency, read-only web UI at `http://127.0.0.1:8420` with risk score, release readiness, audit chain, shadow worktrees, language stats, and the full tool registry. Works offline, no CDN
+- **npm wrapper** — `npx sdlc-mcp` runs the server straight from the Node ecosystem (bundles the Python sources; only needs Python 3.9+ on PATH)
 
 ---
 
@@ -219,6 +221,40 @@ pip install --user -e .
 # The binaries are now at:
 #   ~/.local/bin/sdlc        (CLI)
 #   ~/.local/bin/sdlc-mcp    (MCP server)
+```
+
+### npm / npx install (JavaScript ecosystem)
+
+If you live in the Node world, the `sdlc-mcp` npm package bundles the entire
+Python implementation — no `pip install` needed, just Python 3.9+ on PATH:
+
+```bash
+# Run the MCP server directly
+npx sdlc-mcp
+
+# Or use the CLI
+npx -p sdlc-mcp sdlc doctor
+```
+
+MCP client config for npx:
+
+```json
+{
+  "mcpServers": {
+    "sdlc": { "command": "npx", "args": ["-y", "sdlc-mcp"] }
+  }
+}
+```
+
+### Web dashboard
+
+For a visual, read-only overview of any repository:
+
+```bash
+sdlc dashboard --path /path/to/project --open
+# Serves http://127.0.0.1:8420 — risk grade, release readiness checks,
+# audit chain status, shadow worktrees, language breakdown, tool registry.
+# Read-only: the dashboard can never modify your code.
 ```
 
 ### Connecting to your AI assistant
