@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "1.1.1"
+VERSION = "1.2.0"
 MAX_FILES_LIMIT = 2_000
 MAX_READ_BYTES = 1_048_576
 DEFAULT_READ_BYTES = 65_536

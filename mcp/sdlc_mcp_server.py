@@ -19,13 +19,16 @@ from typing import Any, Callable
 from sdlc_core import InputError, VERSION, directory_tree, plugin_preflight, read_file_content, read_multiple_files, release_readiness, repo_snapshot
 from sdlc_analyze import dependency_inventory, doctor, git_history, language_stats, risk_score, search_code, secret_scan
 from sdlc_write import audit_log, list_changes, replace_in_file, rollback, write_file
+from sdlc_shadow import shadow_create, shadow_promote, shadow_destroy, shadow_list
 try:
-    from sdlc_extensions import code_metrics, sbom_lite
+    from sdlc_extensions import code_metrics, sbom_lite, entropy_scan, replace_in_file_ast
     HAS_EXTENSIONS = True
 except ImportError:
     HAS_EXTENSIONS = False
     code_metrics = None
     sbom_lite = None
+    entropy_scan = None
+    replace_in_file_ast = None
 
 
 SERVER_INFO = {"name": "autonomous-sdlc-command-center", "version": VERSION}
@@ -363,6 +366,86 @@ TOOLS: list[dict[str, Any]] = [
         "outputSchema": _object_schema({"status": {"type": "string"}, "componentCount": {"type": "integer"}}),
         "annotations": _READ_ONLY_ANNOTATIONS,
     },
+    {
+        "name": "sdlc_entropy_scan",
+        "title": "Entropy Secret Scan",
+        "description": "Shannon entropy-based secret detector. Flags high-entropy tokens (H > 4.5) without regex patterns. Catches random API keys, JWTs, and obfuscated credentials that signature scanners miss.",
+        "inputSchema": _object_schema(
+            {
+                "path": _PATH_PROPERTY,
+                "maxFiles": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 1000},
+                "maxFileBytes": {"type": "integer", "minimum": 1024, "maximum": 1048576, "default": 262144},
+                "maxFindings": {"type": "integer", "minimum": 1, "maximum": 5000, "default": 500},
+                "entropyThreshold": {"type": "number", "minimum": 2.0, "maximum": 8.0, "default": 4.5, "description": "Minimum Shannon entropy (bits/char) to flag a token."},
+                "minTokenLength": {"type": "integer", "minimum": 8, "maximum": 128, "default": 16},
+            }
+        ),
+        "outputSchema": _object_schema({"status": {"type": "string"}, "findingCount": {"type": "integer"}}),
+        "annotations": _READ_ONLY_ANNOTATIONS,
+    },
+    {
+        "name": "sdlc_replace_in_file_ast",
+        "title": "AST Replace In File (Gated)",
+        "description": "Scope-aware string replacement using Python's AST module. For .py files, only replaces string literals (not variable names or code). Falls back to exact replacement for non-Python files.",
+        "inputSchema": _object_schema(
+            {
+                "path": _PATH_PROPERTY,
+                "filePath": _FILE_PATH_PROPERTY,
+                "find": {"type": "string", "minLength": 1},
+                "replace": {"type": "string", "default": ""},
+                **_CONFIRM_PROPERTIES,
+            },
+            required=["filePath", "find"],
+        ),
+        "outputSchema": _object_schema({"status": {"type": "string"}, "occurrences": {"type": "integer"}}),
+        "annotations": _WRITE_ANNOTATIONS,
+    },
+    {
+        "name": "sdlc_shadow_create",
+        "title": "Create Shadow Worktree",
+        "description": "Spawn an isolated Git worktree at .sdlc/shadows/ for zero-latency agent execution. Write files and run tests in the shadow without touching the main working tree.",
+        "inputSchema": _object_schema({"path": _PATH_PROPERTY}),
+        "outputSchema": _object_schema({"status": {"type": "string"}, "sessionId": {"type": "string"}}),
+        "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False},
+    },
+    {
+        "name": "sdlc_shadow_promote",
+        "title": "Promote Shadow Worktree",
+        "description": "Promote verified changes from a shadow worktree to the main repository. Performs 3-way conflict check before writing.",
+        "inputSchema": _object_schema(
+            {
+                "path": _PATH_PROPERTY,
+                "sessionId": {"type": "string", "description": "Shadow session ID from sdlc_shadow_create."},
+                "force": {"type": "boolean", "default": False, "description": "Overwrite even if conflicts detected."},
+                **_CONFIRM_PROPERTIES,
+            },
+            required=["sessionId"],
+        ),
+        "outputSchema": _object_schema({"status": {"type": "string"}, "promotedCount": {"type": "integer"}}),
+        "annotations": _WRITE_ANNOTATIONS,
+    },
+    {
+        "name": "sdlc_shadow_destroy",
+        "title": "Destroy Shadow Worktree",
+        "description": "Remove a shadow worktree and its temporary branch. Safe to call on already-destroyed sessions.",
+        "inputSchema": _object_schema(
+            {
+                "path": _PATH_PROPERTY,
+                "sessionId": {"type": "string", "description": "Shadow session ID to destroy."},
+            },
+            required=["sessionId"],
+        ),
+        "outputSchema": _object_schema({"status": {"type": "string"}, "sessionId": {"type": "string"}}),
+        "annotations": {"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False},
+    },
+    {
+        "name": "sdlc_shadow_list",
+        "title": "List Shadow Worktrees",
+        "description": "List active shadow worktree sessions for this repository.",
+        "inputSchema": _object_schema({"path": _PATH_PROPERTY}),
+        "outputSchema": _object_schema({"status": {"type": "string"}, "activeCount": {"type": "integer"}}),
+        "annotations": _READ_ONLY_ANNOTATIONS,
+    },
 ]
 
 TOOL_HANDLERS: dict[str, Callable[[dict[str, Any] | None], dict[str, Any]]] = {
@@ -384,12 +467,18 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any] | None], dict[str, Any]]] = {
     "sdlc_write_file": write_file,
     "sdlc_replace_in_file": replace_in_file,
     "sdlc_rollback": rollback,
+    "sdlc_shadow_create": shadow_create,
+    "sdlc_shadow_promote": shadow_promote,
+    "sdlc_shadow_destroy": shadow_destroy,
+    "sdlc_shadow_list": shadow_list,
 }
 
 # Conditionally add extended tools if module available
 if HAS_EXTENSIONS:
     TOOL_HANDLERS["sdlc_code_metrics"] = code_metrics
     TOOL_HANDLERS["sdlc_sbom"] = sbom_lite
+    TOOL_HANDLERS["sdlc_entropy_scan"] = entropy_scan
+    TOOL_HANDLERS["sdlc_replace_in_file_ast"] = replace_in_file_ast
 
 
 def _response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
