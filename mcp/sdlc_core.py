@@ -11,12 +11,13 @@ import os
 import re
 import shutil
 import subprocess
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 MAX_FILES_LIMIT = 2_000
 MAX_READ_BYTES = 1_048_576
 DEFAULT_READ_BYTES = 65_536
@@ -540,9 +541,9 @@ def directory_tree(arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     skipped_depth_limited = 0
 
-    queue: list[tuple[Path, int]] = [(root, 0)]
+    queue: deque[tuple[Path, int]] = deque([(root, 0)])
     while queue and len(entries) < max_entries:
-        directory, depth = queue.pop(0)
+        directory, depth = queue.popleft()
         if depth > max_depth:
             skipped_depth_limited += 1
             continue

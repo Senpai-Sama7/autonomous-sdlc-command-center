@@ -27,7 +27,7 @@ MCP_DIR = ROOT / "mcp"
 CLI = MCP_DIR / "sdlc_cli.py"
 SERVER = MCP_DIR / "sdlc_mcp_server.py"
 PY = sys.executable
-EXPECTED_TOOL_COUNT = 18
+EXPECTED_TOOL_COUNT = 20  # 18 original + 2 extended (code_metrics, sbom)
 AWS_EXAMPLE_KEY = "AKIA" + "IOSFODNN7EXAMPLE"  # AWS's documented example key
 
 sys.path.insert(0, str(MCP_DIR))

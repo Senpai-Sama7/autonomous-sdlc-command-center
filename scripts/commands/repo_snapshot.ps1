@@ -77,34 +77,106 @@ function Get-GitSummary {
 
 $resolvedPath = Resolve-RepositoryPath -Candidate $Path
 $rgPath = Get-ApplicationPath -Name 'rg'
+$ignoredDirs = @('.git','.hg','.svn','.venv','venv','node_modules','vendor','dist','build','coverage','target','__pycache__','.sdlc')
+
+function Get-FilesViaNative {
+  param(
+    [string]$Root,
+    [string[]]$Ignored,
+    [int]$Limit
+  )
+  $result = [System.Collections.Generic.List[string]]::new()
+  $stack = [System.Collections.Generic.Stack[string]]::new()
+  $stack.Push($Root)
+  $inaccessible = 0
+  while ($stack.Count -gt 0 -and $result.Count -lt $Limit) {
+    $current = $stack.Pop()
+    try {
+      $children = Get-ChildItem -LiteralPath $current -Force -ErrorAction Stop
+    } catch {
+      $inaccessible++
+      continue
+    }
+    # Sort case-insensitive for deterministic output
+    $children = $children | Sort-Object { $_.Name.ToLower() }
+    $subdirs = @()
+    foreach ($child in $children) {
+      if ($result.Count -ge $Limit) { break }
+      if ($Ignored -contains $child.Name) { continue }
+      if ($child.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+      try {
+        $relative = $child.FullName.Substring($Root.Length).TrimStart('\','/')
+        if ($child.PSIsContainer) {
+          $subdirs += $child.FullName
+        } else {
+          $result.Add($relative)
+        }
+      } catch { continue }
+    }
+    # Push subdirs in reverse for DFS similar to original
+    for ($i = $subdirs.Length - 1; $i -ge 0; $i--) {
+      $stack.Push($subdirs[$i])
+    }
+  }
+  return ,$result.ToArray()
+}
+
 if ([string]::IsNullOrWhiteSpace($rgPath)) {
-  throw 'repo_snapshot.ps1 requires ripgrep (rg) on PATH. Install ripgrep or run this command from a Codex environment that includes it.'
+  Write-Warning "ripgrep (rg) not found on PATH, falling back to native PowerShell enumeration (slower, no .gitignore respect)."
+  # Try Python fallback first (faster & respects IGNORED list exactly)
+  $pythonPath = Get-ApplicationPath -Name 'python'
+  if ($null -eq $pythonPath) { $pythonPath = Get-ApplicationPath -Name 'python3' }
+  $sdlcCli = $null
+  if ($pythonPath) {
+    $candidateCli = Join-Path $PSScriptRoot "..\..\mcp\sdlc_cli.py"
+    if (Test-Path $candidateCli) { $sdlcCli = $candidateCli }
+    else {
+      # Try installed sdlc command
+      $sdlcBin = Get-ApplicationPath -Name 'sdlc'
+      if ($sdlcBin) {
+        try {
+          $jsonOut = & $sdlcBin snapshot --path $resolvedPath --max-files $MaxFiles 2>$null | Out-String
+          if ($jsonOut) {
+            $parsed = $jsonOut | ConvertFrom-Json
+            if ($parsed.fileCountSampled -ge 0) {
+              # We can directly return the Python CLI output (convert to our format)
+              $relativeFiles = $parsed.manifests + $parsed.lockfiles + $parsed.ciFiles + $parsed.testFiles + $parsed.infrastructureFiles
+              # Actually snapshot returns sampled file list indirectly? We need full file list; for simplicity use Python's walk file list if available
+              # Re-run with --format json and parse full structure - but our snapshot does not return file list, only counts. So fallback to native.
+            }
+          }
+        } catch {}
+      }
+    }
+  }
+  $filesNative = Get-FilesViaNative -Root $resolvedPath -Ignored $ignoredDirs -Limit $MaxFiles
+  $relativeFiles = @($filesNative)
+} else {
+  $rgArguments = @(
+    '--files',
+    '--hidden',
+    '--glob', '!.git/**',
+    '--glob', '!node_modules/**',
+    '--glob', '!vendor/**',
+    '--glob', '!dist/**',
+    '--glob', '!build/**',
+    '--glob', '!coverage/**',
+    '--glob', '!target/**',
+    '--', $resolvedPath
+  )
+
+  $global:LASTEXITCODE = $null
+  $rgOutput = @(& $rgPath @rgArguments 2>$null)
+  $rgExitCode = if ($global:LASTEXITCODE -is [int]) { $global:LASTEXITCODE } else { 0 }
+  $files = $rgOutput | Select-Object -First $MaxFiles
+  if ($rgExitCode -gt 1) {
+    throw "ripgrep failed while scanning '$resolvedPath' (exit code $rgExitCode)."
+  }
+
+  $relativeFiles = @($files | ForEach-Object {
+    $_.Substring($resolvedPath.Length).TrimStart('\', '/')
+  })
 }
-
-$rgArguments = @(
-  '--files',
-  '--hidden',
-  '--glob', '!.git/**',
-  '--glob', '!node_modules/**',
-  '--glob', '!vendor/**',
-  '--glob', '!dist/**',
-  '--glob', '!build/**',
-  '--glob', '!coverage/**',
-  '--glob', '!target/**',
-  '--', $resolvedPath
-)
-
-$global:LASTEXITCODE = $null
-$rgOutput = @(& $rgPath @rgArguments 2>$null)
-$rgExitCode = if ($global:LASTEXITCODE -is [int]) { $global:LASTEXITCODE } else { 0 }
-$files = $rgOutput | Select-Object -First $MaxFiles
-if ($rgExitCode -gt 1) {
-  throw "ripgrep failed while scanning '$resolvedPath' (exit code $rgExitCode)."
-}
-
-$relativeFiles = @($files | ForEach-Object {
-  $_.Substring($resolvedPath.Length).TrimStart('\', '/')
-})
 
 $manifestNames = @(
   'package.json', 'pnpm-workspace.yaml', 'pyproject.toml', 'requirements.txt', 'Pipfile',

@@ -9,11 +9,19 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any, Callable
 
 from sdlc_core import InputError, VERSION, directory_tree, plugin_preflight, read_file_content, read_multiple_files, release_readiness, repo_snapshot
 from sdlc_analyze import dependency_inventory, doctor, git_history, language_stats, risk_score, search_code, secret_scan
 from sdlc_write import audit_log, list_changes, replace_in_file, rollback, write_file
+try:
+    from sdlc_extensions import code_metrics, sbom_lite
+    HAS_EXTENSIONS = True
+except ImportError:
+    HAS_EXTENSIONS = False
+    code_metrics = None
+    sbom_lite = None
 
 
 def _add_path(parser: argparse.ArgumentParser) -> None:
@@ -29,7 +37,9 @@ def _add_format(parser: argparse.ArgumentParser, sarif: bool = False) -> None:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sdlc", description=f"SDLC command center CLI (core {VERSION})")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument("-v", "--verbose", action="store_true", help="Verbose output for debugging")
+    sub = parser.add_subparsers(dest="command", required=False)
 
     p = sub.add_parser("snapshot", help="Bounded repository inventory")
     _add_path(p); p.add_argument("--max-files", type=int, default=250); p.add_argument("--include-git", action="store_true"); _add_format(p)
@@ -101,6 +111,15 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("serve", help="Run the MCP server (stdio default, or --http PORT)")
     p.add_argument("--http", type=int, default=None); p.add_argument("--host", default="127.0.0.1")
+
+    p = sub.add_parser("metrics", help="Heuristic code health metrics (TODOs, complexity hints, large files)")
+    _add_path(p); p.add_argument("--max-files", type=int, default=1000); _add_format(p)
+
+    p = sub.add_parser("sbom", help="Offline SBOM-lite (CycloneDX) from manifests")
+    _add_path(p); p.add_argument("--max-files", type=int, default=500); _add_format(p)
+
+    p = sub.add_parser("completion", help="Generate shell completion script")
+    p.add_argument("--shell", choices=["bash", "zsh", "fish"], default="bash")
 
     return parser
 
@@ -239,6 +258,16 @@ def _render_text(command: str, result: dict[str, Any]) -> str:
         lines.append(f"entries: {result.get('entryCount')}  chain valid: {result.get('chainValid')}")
         for entry in result.get("entries", []):
             lines.append(f"  #{entry.get('seq')} {entry.get('timestampUtc')} {entry.get('operation')} {entry.get('path') or ''}")
+    elif command == "metrics":
+        lines.append(f"health: {result.get('healthScore')}/100 grade={result.get('grade')} files={result.get('metrics', {}).get('filesScanned')}")
+        m = result.get("metrics", {})
+        lines.append(f"  todos={m.get('todoCount')} fixmes={m.get('fixmeCount')} large={len(m.get('largeFiles', []))} longLines={m.get('longLines')} complexityHints={len(m.get('complexityHints', []))}")
+        for item in result.get("topTodoFiles", [])[:10]:
+            lines.append(f"  TODO-heavy: {item['file']} x{item['count']}")
+    elif command == "sbom":
+        lines.append(f"components: {result.get('componentCount')} unique={result.get('bom', {}).get('metadata', {}).get('component', {}).get('name')} manifests={result.get('manifestCount')}")
+        for comp in result.get("bom", {}).get("components", [])[:15]:
+            lines.append(f"  {comp.get('ecosystem')}:{comp.get('name')}@{comp.get('version')} [{comp.get('manifest')}]")
     else:
         return json.dumps(result, indent=2, ensure_ascii=False)
     return "\n".join(lines)
@@ -271,7 +300,18 @@ def _build_arguments(command: str, args: argparse.Namespace) -> dict[str, Any]:
         return {}
     if command == "write":
         if args.content_file is not None:
-            content = sys.stdin.read() if args.content_file == "-" else open(args.content_file, "r", encoding="utf-8").read()
+            if args.content_file == "-":
+                content = sys.stdin.read()
+            else:
+                try:
+                    with open(args.content_file, "r", encoding="utf-8") as f:
+                        content = f.read()
+                except FileNotFoundError:
+                    raise InputError(f"content file not found: {args.content_file}")
+                except IsADirectoryError:
+                    raise InputError(f"content file is a directory: {args.content_file}")
+                except OSError as exc:
+                    raise InputError(f"cannot read content file: {exc}") from exc
         else:
             content = args.content
         return {
@@ -289,6 +329,13 @@ def _build_arguments(command: str, args: argparse.Namespace) -> dict[str, Any]:
         return {"path": args.path, "changeId": args.change_id, "confirm": args.confirm}
     if command == "audit":
         return {"path": args.path, "maxEntries": args.max_entries}
+    if command == "metrics":
+        return {"path": args.path, "maxFiles": args.max_files}
+    if command == "sbom":
+        return {"path": args.path, "maxFiles": args.max_files}
+    if command == "completion":
+        # Handled specially in main - no core args
+        return {"shell": args.shell}
     raise InputError(f"unknown command: {command}")
 
 
@@ -313,15 +360,139 @@ _HANDLERS: dict[str, Callable[[dict[str, Any] | None], dict[str, Any]]] = {
     "audit": audit_log,
 }
 
+# Extend with optional extensions if available
+if HAS_EXTENSIONS:
+    _HANDLERS["metrics"] = code_metrics
+    _HANDLERS["sbom"] = sbom_lite
+else:
+    # Provide stub handlers that explain extension missing
+    def _missing_ext(*_a, **_kw):
+        raise InputError("extended tools require sdlc_extensions module - reinstall from source")
+    _HANDLERS["metrics"] = _missing_ext
+    _HANDLERS["sbom"] = _missing_ext
+
+
+def _completion_script(shell: str) -> str:
+    # Try to load from project checkout first, then fallback to embedded
+    candidate_paths = [
+        Path(__file__).parent.parent / "scripts" / "completions" / f"sdlc.{shell}",
+        Path.home() / "Projects" / "autonomous-sdlc-command-center" / "scripts" / "completions" / f"sdlc.{shell}",
+        Path.home() / ".local" / "share" / "autonomous-sdlc-command-center" / "completions" / f"sdlc.{shell}",
+    ]
+    for p in candidate_paths:
+        try:
+            if p.is_file():
+                return p.read_text(encoding="utf-8")
+        except OSError:
+            continue
+
+    if shell == "bash":
+        return """# Bash completion for sdlc CLI
+_sdlc_completions() {
+  local cur prev commands
+  cur="${COMP_WORDS[COMP_CWORD]}"
+  prev="${COMP_WORDS[COMP_CWORD-1]}"
+  commands="snapshot release-readiness plugin-preflight read read-batch tree search secret-scan languages deps git-history risk doctor write replace changes rollback audit serve metrics sbom completion"
+  if [[ ${COMP_CWORD} -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "${commands} --version --help -v" -- "${cur}") )
+    return
+  fi
+  case "${COMP_WORDS[1]}" in
+    snapshot|release-readiness|languages|deps|git-history|risk|tree|search|secret-scan|read|read-batch|write|replace|changes|rollback|audit|metrics|sbom)
+      if [[ "${cur}" == --* ]]; then
+        COMPREPLY=( $(compgen -W "--path --format --pretty --strict --max-files --include-git --file --max-bytes --max-lines --no-redact --max-depth --max-entries --files-only --dirs-only --pattern --file-pattern --max-results --context-lines --mode --content --content-file --expected-sha256 --allow-sensitive --confirm --find --replace --expected-occurrences --change-id --max-entries --max-commits --help" -- "${cur}") )
+      fi
+      ;;
+    doctor|plugin-preflight)
+      COMPREPLY=( $(compgen -W "--format --pretty --plugin-path --help" -- "${cur}") )
+      ;;
+  esac
+}
+complete -F _sdlc_completions sdlc
+complete -F _sdlc_completions sdlc-mcp
+complete -F _sdlc_completions sdlc-universal
+"""
+    if shell == "zsh":
+        return """#compdef sdlc sdlc-mcp sdlc-universal
+_sdlc() {
+  local -a commands
+  commands=(
+    'snapshot:Bounded repository inventory'
+    'release-readiness:Release-readiness evidence'
+    'plugin-preflight:Validate plugin'
+    'read:Bounded file read'
+    'read-batch:Batch read'
+    'tree:Directory listing'
+    'search:Regex search'
+    'secret-scan:Secret scan'
+    'languages:Language stats'
+    'deps:Dependency inventory'
+    'git-history:Git history'
+    'risk:Risk score'
+    'doctor:Doctor'
+    'write:Gated write'
+    'replace:Gated replace'
+    'changes:List changes'
+    'rollback:Rollback'
+    'audit:Audit log'
+    'serve:MCP server'
+    'metrics:Code metrics'
+    'sbom:SBOM Lite'
+    'completion:Shell completion'
+  )
+  _describe 'command' commands
+}
+_sdlc "$@"
+"""
+    if shell == "fish":
+        return """
+complete -c sdlc -f
+complete -c sdlc -n '__fish_use_subcommand' -a snapshot -d 'Repository inventory'
+complete -c sdlc -n '__fish_use_subcommand' -a release-readiness -d 'Release readiness'
+complete -c sdlc -n '__fish_use_subcommand' -a doctor -d 'Doctor'
+complete -c sdlc -n '__fish_use_subcommand' -a risk -d 'Risk score'
+complete -c sdlc -n '__fish_use_subcommand' -a secret-scan -d 'Secret scan'
+complete -c sdlc -n '__fish_use_subcommand' -a metrics -d 'Code metrics'
+complete -c sdlc -n '__fish_use_subcommand' -a sbom -d 'SBOM'
+complete -c sdlc -n '__fish_use_subcommand' -a search -d 'Search code'
+complete -c sdlc -n '__fish_use_subcommand' -a tree -d 'Directory tree'
+complete -c sdlc -n '__fish_use_subcommand' -a languages -d 'Language stats'
+complete -c sdlc -n '__fish_use_subcommand' -a deps -d 'Dependency inventory'
+complete -c sdlc -n '__fish_use_subcommand' -a git-history -d 'Git history'
+complete -c sdlc -n '__fish_use_subcommand' -a write -d 'Gated write'
+complete -c sdlc -n '__fish_use_subcommand' -a replace -d 'Gated replace'
+"""
+    raise InputError(f"unsupported shell: {shell}")
+
 
 def main() -> int:
     args = _parser().parse_args()
+
+    if not args.command:
+        # Default to doctor when no command supplied for quick health check
+        args.command = "doctor"
+        # Ensure format attr exists
+        if not hasattr(args, "format"):
+            args.format = "json"
+        if not hasattr(args, "pretty"):
+            args.pretty = False
+        if not hasattr(args, "strict"):
+            args.strict = False
 
     if args.command == "serve":
         import sdlc_mcp_server
 
         sys.argv = [sys.argv[0]] + (["--http", str(args.http), "--host", args.host] if args.http is not None else [])
         return sdlc_mcp_server.main()
+
+    if args.command == "completion":
+        try:
+            script = _completion_script(args.shell)
+            print(script)
+            return 0
+        except InputError as exc:
+            print(json.dumps({"status": "error", "error": str(exc)}, separators=(",", ":")), file=sys.stderr)
+            return 2
 
     try:
         result = _HANDLERS[args.command](_build_arguments(args.command, args))

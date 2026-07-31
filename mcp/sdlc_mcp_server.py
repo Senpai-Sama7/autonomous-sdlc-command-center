@@ -19,6 +19,13 @@ from typing import Any, Callable
 from sdlc_core import InputError, VERSION, directory_tree, plugin_preflight, read_file_content, read_multiple_files, release_readiness, repo_snapshot
 from sdlc_analyze import dependency_inventory, doctor, git_history, language_stats, risk_score, search_code, secret_scan
 from sdlc_write import audit_log, list_changes, replace_in_file, rollback, write_file
+try:
+    from sdlc_extensions import code_metrics, sbom_lite
+    HAS_EXTENSIONS = True
+except ImportError:
+    HAS_EXTENSIONS = False
+    code_metrics = None
+    sbom_lite = None
 
 
 SERVER_INFO = {"name": "autonomous-sdlc-command-center", "version": VERSION}
@@ -329,6 +336,33 @@ TOOLS: list[dict[str, Any]] = [
         "outputSchema": _object_schema({"status": {"type": "string"}, "plan": {"type": "array"}}),
         "annotations": _WRITE_ANNOTATIONS,
     },
+    {
+        "name": "sdlc_code_metrics",
+        "title": "Code Metrics",
+        "description": "Heuristic code health: TODO/FIXME counts, large files, long lines, empty files, branch-density hints, health score A-F. Offline, dependency-free.",
+        "inputSchema": _object_schema(
+            {
+                "path": _PATH_PROPERTY,
+                "maxFiles": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 1000},
+                "maxFileBytes": {"type": "integer", "minimum": 1024, "maximum": 1048576, "default": 262144},
+            }
+        ),
+        "outputSchema": _object_schema({"status": {"type": "string"}, "healthScore": {"type": "integer"}}),
+        "annotations": _READ_ONLY_ANNOTATIONS,
+    },
+    {
+        "name": "sdlc_sbom",
+        "title": "SBOM Lite (CycloneDX)",
+        "description": "Offline SBOM generation from manifests (package.json, requirements.txt, pyproject.toml, go.mod, Cargo.toml) into CycloneDX-like JSON. No network, no registry lookup.",
+        "inputSchema": _object_schema(
+            {
+                "path": _PATH_PROPERTY,
+                "maxFiles": {"type": "integer", "minimum": 1, "maximum": 2000, "default": 500},
+            }
+        ),
+        "outputSchema": _object_schema({"status": {"type": "string"}, "componentCount": {"type": "integer"}}),
+        "annotations": _READ_ONLY_ANNOTATIONS,
+    },
 ]
 
 TOOL_HANDLERS: dict[str, Callable[[dict[str, Any] | None], dict[str, Any]]] = {
@@ -351,6 +385,11 @@ TOOL_HANDLERS: dict[str, Callable[[dict[str, Any] | None], dict[str, Any]]] = {
     "sdlc_replace_in_file": replace_in_file,
     "sdlc_rollback": rollback,
 }
+
+# Conditionally add extended tools if module available
+if HAS_EXTENSIONS:
+    TOOL_HANDLERS["sdlc_code_metrics"] = code_metrics
+    TOOL_HANDLERS["sdlc_sbom"] = sbom_lite
 
 
 def _response(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -536,6 +575,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="autonomous-sdlc-command-center MCP server")
     parser.add_argument("--http", type=int, metavar="PORT", default=None, help="Serve JSON-RPC over localhost HTTP on PORT instead of stdio")
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host (default 127.0.0.1)")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
+    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARN", "ERROR"], default="INFO", help="Log verbosity for HTTP transport")
     args = parser.parse_args()
 
     if args.http is not None:

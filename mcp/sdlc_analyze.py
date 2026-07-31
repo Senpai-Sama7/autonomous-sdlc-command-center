@@ -270,12 +270,20 @@ def language_stats(arguments: dict[str, Any] | None = None) -> dict[str, Any]:
                     sniff = handle.read(8_192)
                     if is_probably_binary(sniff):
                         continue
-                    line_count = len(sniff.splitlines()) - (0 if sniff.endswith(b"\n") or not sniff else 0)
+                    # Full accurate line count
+                    handle.seek(0)
+                    nl = 0
+                    last = None
                     while True:
                         chunk = handle.read(1_048_576)
                         if not chunk:
                             break
-                        line_count += chunk.count(b"\n")
+                        nl += chunk.count(b"\n")
+                        last = chunk[-1:]
+                    if size == 0:
+                        line_count = 0
+                    else:
+                        line_count = nl + (0 if last == b"\n" else 1)
             except OSError:
                 continue
             bucket["lines"] += line_count
@@ -605,14 +613,40 @@ def doctor(arguments: dict[str, Any] | None = None) -> dict[str, Any]:
     except OSError:
         temp_writable = False
 
-    plugin_root = Path(__file__).resolve().parent.parent
+    # Resolve plugin root with fallbacks for pip-installed locations
+    candidate_roots = []
+    env_root = os.environ.get("SDLC_PLUGIN_ROOT")
+    if env_root:
+        candidate_roots.append(Path(env_root))
+    # Original file location (source checkout)
+    candidate_roots.append(Path(__file__).resolve().parent.parent)
+    # Common global install locations
+    candidate_roots.extend([
+        Path.home() / "Projects" / "autonomous-sdlc-command-center",
+        Path.home() / ".local" / "share" / "autonomous-sdlc-command-center" / "autonomous-sdlc-command-center",
+        Path.home() / ".local" / "share" / "autonomous-sdlc-command-center",
+        Path.cwd(),
+    ])
+    plugin_root = None
     preflight_status = None
+    for candidate in candidate_roots:
+        try:
+            if (candidate / ".codex-plugin" / "plugin.json").is_file():
+                plugin_root = candidate
+                break
+        except OSError:
+            continue
+    if plugin_root is None:
+        plugin_root = Path(__file__).resolve().parent.parent
     if (plugin_root / ".codex-plugin" / "plugin.json").is_file():
         try:
             preflight = plugin_preflight({"pluginPath": str(plugin_root)})
             preflight_status = {"status": preflight["status"], "errors": preflight["summary"]["errors"], "warnings": preflight["summary"]["warnings"]}
         except InputError:
             preflight_status = None
+    else:
+        # If installed via pip and no plugin.json found, still report core healthy with null preflight
+        preflight_status = None
 
     return {
         "status": "ok",
