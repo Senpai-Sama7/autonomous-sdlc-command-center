@@ -143,7 +143,10 @@ def _():
 
 @test("CLI release-readiness returns checks")
 def _():
-    result = cli_json("release-readiness", "--path", str(ROOT), "--max-files", "100")
+    code, stdout, _ = run_cli("release-readiness", "--path", str(ROOT), "--max-files", "100")
+    result = json.loads(stdout)
+    # status "blocked" exits with code 1; that's expected when working tree is dirty
+    assert code in {0, 1}, f"unexpected exit code {code}"
     assert result["status"] in {"ready-for-verification", "needs-review", "blocked"}
     assert isinstance(result["checks"], list) and result["checks"]
 
@@ -710,6 +713,299 @@ def _():
         server.shutdown()
         server.server_close()
         thread.join(timeout=10)
+
+
+# ------------------------------------------------------ Streamable HTTP
+
+
+@test("Streamable HTTP: session management and CORS")
+def _():
+    import sdlc_mcp_server
+    from sdlc_config import ConfigManager
+
+    with tempfile.TemporaryDirectory() as root:
+        config = ConfigManager(Path(root))
+        server = sdlc_mcp_server.create_http_server("127.0.0.1", 0, config=config)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{port}"
+        try:
+            # POST should return Mcp-Session-Id header
+            request = urllib.request.Request(
+                f"{base}/mcp",
+                data=b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}',
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                session_id = response.headers.get("Mcp-Session-Id")
+                assert session_id is not None, "Streamable HTTP must return Mcp-Session-Id"
+                assert session_id.startswith("sdlc-"), f"session ID must start with sdlc-, got {session_id}"
+                result = json.loads(response.read().decode("utf-8"))
+            assert result["result"]["protocolVersion"] in sdlc_mcp_server.SUPPORTED_PROTOCOL_VERSIONS
+
+            # GET /mcp with session should work
+            request2 = urllib.request.Request(
+                f"{base}/mcp",
+                headers={"Mcp-Session-Id": session_id},
+                method="GET",
+            )
+            with urllib.request.urlopen(request2, timeout=10) as response:
+                info = json.loads(response.read().decode("utf-8"))
+            assert info["status"] == "streamable-http"
+            assert info["sessionActive"] is True
+
+            # DELETE /mcp should terminate session
+            request3 = urllib.request.Request(
+                f"{base}/mcp",
+                headers={"Mcp-Session-Id": session_id},
+                method="DELETE",
+            )
+            with urllib.request.urlopen(request3, timeout=10) as response:
+                assert response.status == 204
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=10)
+
+
+@test("Streamable HTTP: CORS headers present")
+def _():
+    import sdlc_mcp_server
+    from sdlc_config import ConfigManager
+
+    with tempfile.TemporaryDirectory() as root:
+        config = ConfigManager(Path(root))
+        server = sdlc_mcp_server.create_http_server("127.0.0.1", 0, config=config)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{port}"
+        try:
+            request = urllib.request.Request(
+                f"{base}/mcp",
+                data=b'{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}',
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                assert response.headers.get("Access-Control-Allow-Origin") is not None
+                assert "POST" in response.headers.get("Access-Control-Allow-Methods", "")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=10)
+
+
+# ----------------------------------------------------------- Auth
+
+
+@test("Auth: Bearer token validation")
+def _():
+    import sdlc_mcp_server
+    from sdlc_config import ConfigManager
+
+    with tempfile.TemporaryDirectory() as root:
+        config = ConfigManager(Path(root))
+        auth = sdlc_mcp_server.AuthManager(root, config)
+        token = open(os.path.join(root, ".sdlc", "server.token"), "r").read().strip()
+        assert len(token) == 64, "token should be 32 bytes hex (64 chars)"
+        assert auth.validate(f"Bearer {token}")
+        assert not auth.validate("Bearer wrong-token")
+        assert not auth.validate(None)
+        assert not auth.validate("Basic creds")
+        preview = auth.get_token_preview()
+        assert "..." in preview
+
+
+@test("Auth: token rotation archives old token")
+def _():
+    import sdlc_mcp_server
+    from sdlc_config import ConfigManager
+
+    with tempfile.TemporaryDirectory() as root:
+        config = ConfigManager(Path(root))
+        auth = sdlc_mcp_server.AuthManager(root, config)
+        old_token = open(os.path.join(root, ".sdlc", "server.token"), "r").read().strip()
+        new_token = auth.rotate_token()
+        assert new_token != old_token
+        assert auth.validate(f"Bearer {new_token}")
+        assert not auth.validate(f"Bearer {old_token}")
+        tokens_file = os.path.join(root, ".sdlc", "tokens.json")
+        assert os.path.exists(tokens_file)
+        archived = json.loads(open(tokens_file, "r").read())
+        assert old_token in archived["tokens"]
+
+
+@test("Streamable HTTP: rejects unauthenticated requests when auth=bearer")
+def _():
+    import sdlc_mcp_server
+    from sdlc_config import ConfigManager
+
+    with tempfile.TemporaryDirectory() as root:
+        config = ConfigManager(Path(root))
+        auth = sdlc_mcp_server.AuthManager(root, config)
+        server = sdlc_mcp_server.create_http_server("127.0.0.1", 0, config=config, auth=auth)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{port}"
+        try:
+            # Health should still work (unauthenticated by default)
+            with urllib.request.urlopen(f"{base}/health", timeout=10) as response:
+                health = json.loads(response.read().decode("utf-8"))
+            assert health["status"] == "ok"
+
+            # POST /mcp without auth should fail
+            request = urllib.request.Request(
+                f"{base}/mcp",
+                data=b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}',
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                urllib.request.urlopen(request, timeout=10)
+                assert False, "should have been rejected"
+            except urllib.error.HTTPError as e:
+                assert e.code == 401
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=10)
+
+
+@test("Streamable HTTP: accepts valid Bearer token")
+def _():
+    import sdlc_mcp_server
+    from sdlc_config import ConfigManager
+
+    with tempfile.TemporaryDirectory() as root:
+        config = ConfigManager(Path(root))
+        auth = sdlc_mcp_server.AuthManager(root, config)
+        token = open(os.path.join(root, ".sdlc", "server.token"), "r").read().strip()
+        server = sdlc_mcp_server.create_http_server("127.0.0.1", 0, config=config, auth=auth)
+        port = server.server_address[1]
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        base = f"http://127.0.0.1:{port}"
+        try:
+            request = urllib.request.Request(
+                f"{base}/mcp",
+                data=b'{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}',
+                headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
+                result = json.loads(response.read().decode("utf-8"))
+            assert result["result"]["protocolVersion"] in sdlc_mcp_server.SUPPORTED_PROTOCOL_VERSIONS
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=10)
+
+
+# ----------------------------------------------------------- Config
+
+
+@test("Config: loads defaults when no config file exists")
+def _():
+    from sdlc_config import ConfigManager
+    with tempfile.TemporaryDirectory() as root:
+        config = ConfigManager(Path(root))
+        assert config.entropy_threshold == 4.5
+        assert config.auth_mode == "bearer"
+        assert config.session_timeout_seconds == 3600
+        assert config.max_file_size_bytes == 1_048_576
+
+
+@test("Config: user overrides merge with defaults")
+def _():
+    from sdlc_config import ConfigManager
+    with tempfile.TemporaryDirectory() as root:
+        config_path = Path(root) / "sdlc.config.json"
+        config_path.write_text(json.dumps({"security": {"entropyThreshold": 5.0}, "auth": {"mode": "none"}}))
+        config = ConfigManager(Path(root))
+        assert config.entropy_threshold == 5.0  # overridden
+        assert config.auth_mode == "none"  # overridden
+        assert config.session_timeout_seconds == 3600  # default preserved
+
+
+@test("Config: init creates default config file")
+def _():
+    from sdlc_config import ConfigManager
+    with tempfile.TemporaryDirectory() as root:
+        config = ConfigManager(Path(root))
+        path = config.write_default()
+        assert path.exists()
+        loaded = json.loads(path.read_text())
+        assert loaded["version"] == "1.0.0"
+        assert loaded["security"]["entropyThreshold"] == 4.5
+        # Calling init again should not overwrite
+        path2 = config.write_default()
+        assert path == path2
+
+
+@test("Config: handles malformed JSON gracefully")
+def _():
+    from sdlc_config import ConfigManager
+    with tempfile.TemporaryDirectory() as root:
+        config_path = Path(root) / "sdlc.config.json"
+        config_path.write_text("{invalid json")
+        config = ConfigManager(Path(root))
+        # Should fall back to defaults
+        assert config.entropy_threshold == 4.5
+
+
+# --------------------------------------------------- CLI: auth + config
+
+
+@test("CLI auth status shows config")
+def _():
+    result = cli_json("auth", "status")
+    assert result["authMode"] == "bearer"
+    assert "tokenPreview" in result
+
+
+@test("CLI auth rotate generates new token")
+def _():
+    with tempfile.TemporaryDirectory() as root:
+        # Initialize token
+        from sdlc_config import ConfigManager
+        config = ConfigManager(Path(root))
+        from sdlc_mcp_server import AuthManager
+        auth = AuthManager(root, config)
+        old_token = open(os.path.join(root, ".sdlc", "server.token"), "r").read().strip()
+        code, stdout, _ = run_cli("auth", "--path", root, "rotate")
+        assert code == 0
+        result = json.loads(stdout)
+        assert result["status"] == "rotated"
+        new_token = open(os.path.join(root, ".sdlc", "server.token"), "r").read().strip()
+        assert new_token != old_token
+
+
+@test("CLI config show displays active config")
+def _():
+    result = cli_json("config", "show")
+    assert result["version"] == "1.0.0"
+    assert "security" in result
+    assert "auth" in result
+
+
+@test("CLI config init creates config file")
+def _():
+    with tempfile.TemporaryDirectory() as root:
+        code, stdout, _ = run_cli("config", "--path", root, "init")
+        assert code == 0
+        result = json.loads(stdout)
+        assert result["status"] == "created"
+        assert (Path(root) / "sdlc.config.json").exists()
+
+
+@test("CLI config validate checks config")
+def _():
+    result = cli_json("config", "validate")
+    assert result["status"] == "valid"
 
 
 # ------------------------------------------------------ PowerShell parity

@@ -15,6 +15,11 @@ from typing import Any, Callable
 from sdlc_core import InputError, VERSION, directory_tree, plugin_preflight, read_file_content, read_multiple_files, release_readiness, repo_snapshot
 from sdlc_analyze import dependency_inventory, doctor, git_history, language_stats, risk_score, search_code, secret_scan
 from sdlc_write import audit_log, list_changes, replace_in_file, rollback, write_file
+from sdlc_config import ConfigManager
+try:
+    from sdlc_mcp_server import AuthManager
+except ImportError:
+    AuthManager = None  # type: ignore[misc,assignment]
 try:
     from sdlc_extensions import code_metrics, sbom_lite
     HAS_EXTENSIONS = True
@@ -120,6 +125,20 @@ def _parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("completion", help="Generate shell completion script")
     p.add_argument("--shell", choices=["bash", "zsh", "fish"], default="bash")
+
+    p = sub.add_parser("auth", help="Manage Bearer token authentication for HTTP transport")
+    _add_path(p)
+    auth_sub = p.add_subparsers(dest="auth_command", required=True)
+    auth_sub.add_parser("rotate", help="Rotate the server Bearer token (invalidates old token)")
+    auth_sub.add_parser("status", help="Show current auth configuration and token preview")
+    auth_sub.add_parser("token", help="Print the current server token (for CI/CD setup)")
+
+    p = sub.add_parser("config", help="Manage sdlc.config.json configuration")
+    _add_path(p)
+    config_sub = p.add_subparsers(dest="config_command", required=True)
+    config_sub.add_parser("show", help="Display the active configuration")
+    config_sub.add_parser("init", help="Create a default sdlc.config.json in the workspace")
+    config_sub.add_parser("validate", help="Validate the current sdlc.config.json")
 
     return parser
 
@@ -336,6 +355,10 @@ def _build_arguments(command: str, args: argparse.Namespace) -> dict[str, Any]:
     if command == "completion":
         # Handled specially in main - no core args
         return {"shell": args.shell}
+    if command == "auth":
+        return {"auth_command": args.auth_command, "path": getattr(args, "path", ".")}
+    if command == "config":
+        return {"config_command": args.config_command, "path": getattr(args, "path", ".")}
     raise InputError(f"unknown command: {command}")
 
 
@@ -465,6 +488,71 @@ complete -c sdlc -n '__fish_use_subcommand' -a replace -d 'Gated replace'
     raise InputError(f"unsupported shell: {shell}")
 
 
+def _handle_auth(args: argparse.Namespace) -> int:
+    workspace = Path(args.path).resolve()
+    config = ConfigManager(workspace)
+    if AuthManager is None:
+        print(json.dumps({"status": "error", "error": "AuthManager unavailable (import failed)"}, separators=(",", ":")), file=sys.stderr)
+        return 2
+    auth = AuthManager(str(workspace), config)
+    cmd = args.auth_command
+
+    if cmd == "rotate":
+        new_token = auth.rotate_token()
+        result = {"status": "rotated", "tokenPreview": auth.get_token_preview(), "message": "Old token archived. Update all clients."}
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if cmd == "token":
+        try:
+            token_file = workspace / config.auth_token_file
+            token = token_file.read_text(encoding="utf-8").strip()
+            print(token)
+            return 0
+        except OSError as exc:
+            print(json.dumps({"status": "error", "error": str(exc)}, separators=(",", ":")), file=sys.stderr)
+            return 2
+
+    if cmd == "status":
+        result = {
+            "authMode": config.auth_mode,
+            "tokenFile": config.auth_token_file,
+            "tokensFile": config.auth_tokens_file,
+            "tokenPreview": auth.get_token_preview(),
+            "allowUnauthenticatedHealth": config.allow_unauthenticated_health,
+            "allowUnauthenticatedToolsRead": config.allow_unauthenticated_tools_read,
+        }
+        print(json.dumps(result, indent=2))
+        return 0
+
+    raise InputError(f"unknown auth command: {cmd}")
+
+
+def _handle_config(args: argparse.Namespace) -> int:
+    workspace = Path(args.path).resolve()
+    config = ConfigManager(workspace)
+    cmd = args.config_command
+
+    if cmd == "show":
+        print(json.dumps(config.to_dict(), indent=2, ensure_ascii=False))
+        return 0
+
+    if cmd == "init":
+        path = config.write_default()
+        result = {"status": "created", "path": str(path)}
+        print(json.dumps(result, indent=2))
+        return 0
+
+    if cmd == "validate":
+        # Re-load triggers validation; ConfigManager prints warnings on failure
+        config.reload()
+        result = {"status": "valid", "configPath": str(config.config_path), "version": config.to_dict().get("version", "unknown")}
+        print(json.dumps(result, indent=2))
+        return 0
+
+    raise InputError(f"unknown config command: {cmd}")
+
+
 def main() -> int:
     args = _parser().parse_args()
 
@@ -493,6 +581,12 @@ def main() -> int:
         except InputError as exc:
             print(json.dumps({"status": "error", "error": str(exc)}, separators=(",", ":")), file=sys.stderr)
             return 2
+
+    if args.command == "auth":
+        return _handle_auth(args)
+
+    if args.command == "config":
+        return _handle_config(args)
 
     try:
         result = _HANDLERS[args.command](_build_arguments(args.command, args))

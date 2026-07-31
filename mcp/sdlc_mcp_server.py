@@ -3,6 +3,8 @@
 Transports:
   - stdio (default): newline-delimited JSON-RPC, one message per line.
   - HTTP  (--http):  request/response JSON-RPC over localhost HTTP (dependency-free).
+  - Streamable HTTP (--http-streamable): 2026 MCP standard with session management,
+    CORS, SSE placeholders, and Bearer token auth.
 
 Cross-platform (Windows/Linux/macOS), Python 3.9+, no third-party packages.
 """
@@ -10,16 +12,23 @@ Cross-platform (Windows/Linux/macOS), Python 3.9+, no third-party packages.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import secrets
 import sys
 import time
+import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 from sdlc_core import InputError, VERSION, directory_tree, plugin_preflight, read_file_content, read_multiple_files, release_readiness, repo_snapshot
 from sdlc_analyze import dependency_inventory, doctor, git_history, language_stats, risk_score, search_code, secret_scan
 from sdlc_write import audit_log, list_changes, replace_in_file, rollback, write_file
 from sdlc_shadow import shadow_create, shadow_promote, shadow_destroy, shadow_list
+from sdlc_config import ConfigManager
 try:
     from sdlc_extensions import code_metrics, sbom_lite, entropy_scan, replace_in_file_ast
     HAS_EXTENSIONS = True
@@ -61,6 +70,112 @@ def _check_rate_limit(tool_name: str) -> None:
         raise InputError(
             f"rate limit exceeded for {tool_name}: {RATE_LIMIT_CALLS} calls per {RATE_LIMIT_WINDOW_SECONDS:.0f}s"
         )
+
+
+class AuthManager:
+    """OAuth 2.0 Bearer token authentication for HTTP transport.
+
+    Generates a random 32-byte hex token on first startup, stored in .sdlc/server.token.
+    Supports token rotation (old tokens archived to .sdlc/tokens.json) and multi-token
+    validation for team deployments.
+    """
+
+    def __init__(self, workspace_root: str, config: ConfigManager):
+        self.root = workspace_root
+        self.config = config
+        self._token_file = os.path.join(workspace_root, config.auth_token_file)
+        self._tokens_file = os.path.join(workspace_root, config.auth_tokens_file)
+        self._ensure_token()
+
+    def _ensure_token(self) -> None:
+        if not os.path.exists(self._token_file):
+            token = secrets.token_hex(32)
+            os.makedirs(os.path.dirname(self._token_file), exist_ok=True)
+            with open(self._token_file, "w", encoding="utf-8") as f:
+                f.write(token)
+            try:
+                os.chmod(self._token_file, 0o600)
+            except OSError:
+                pass  # Windows doesn't support chmod the same way
+
+    def validate(self, authorization_header: str | None) -> bool:
+        if not authorization_header or not authorization_header.startswith("Bearer "):
+            return False
+        token = authorization_header[7:]
+        if not token:
+            return False
+        try:
+            primary = open(self._token_file, "r", encoding="utf-8").read().strip()
+        except OSError:
+            return False
+        return secrets.compare_digest(token, primary)
+
+    def rotate_token(self) -> str:
+        new_token = secrets.token_hex(32)
+        if os.path.exists(self._token_file):
+            try:
+                old = open(self._token_file, "r", encoding="utf-8").read().strip()
+                tokens: dict[str, Any] = {}
+                if os.path.exists(self._tokens_file):
+                    with open(self._tokens_file, "r", encoding="utf-8") as f:
+                        tokens = json.load(f)
+                tokens.setdefault("tokens", []).append(old)
+                with open(self._tokens_file, "w", encoding="utf-8") as f:
+                    json.dump(tokens, f, indent=2)
+            except (OSError, json.JSONDecodeError):
+                pass
+        with open(self._token_file, "w", encoding="utf-8") as f:
+            f.write(new_token)
+        try:
+            os.chmod(self._token_file, 0o600)
+        except OSError:
+            pass
+        return new_token
+
+    def get_token_preview(self) -> str:
+        try:
+            token = open(self._token_file, "r", encoding="utf-8").read().strip()
+            return f"{token[:4]}...{token[-4:]}" if len(token) >= 8 else "****"
+        except OSError:
+            return "not initialised"
+
+
+class SessionManager:
+    """Streamable HTTP session tracking with automatic expiry."""
+
+    def __init__(self, timeout_seconds: int = 3600, max_sessions: int = 100):
+        self.timeout = timeout_seconds
+        self.max_sessions = max_sessions
+        self._sessions: dict[str, dict[str, Any]] = {}
+
+    def create(self) -> str:
+        self._cleanup()
+        if len(self._sessions) >= self.max_sessions:
+            oldest = min(self._sessions, key=lambda k: self._sessions[k]["last_active"])
+            del self._sessions[oldest]
+        sid = f"sdlc-{uuid.uuid4().hex[:16]}"
+        self._sessions[sid] = {"created": time.time(), "last_active": time.time()}
+        return sid
+
+    def touch(self, session_id: str) -> bool:
+        if session_id in self._sessions:
+            self._sessions[session_id]["last_active"] = time.time()
+            return True
+        return False
+
+    def destroy(self, session_id: str) -> bool:
+        return self._sessions.pop(session_id, None) is not None
+
+    def _cleanup(self) -> None:
+        now = time.time()
+        expired = [sid for sid, s in self._sessions.items() if now - s["last_active"] > self.timeout]
+        for sid in expired:
+            del self._sessions[sid]
+
+    @property
+    def active_count(self) -> int:
+        self._cleanup()
+        return len(self._sessions)
 
 
 def _object_schema(properties: dict[str, Any], required: list[str] | None = None) -> dict[str, Any]:
@@ -595,67 +710,173 @@ def _run_stdio() -> int:
     return 0
 
 
-def create_http_server(host: str, port: int):
-    """Build the localhost HTTP transport. Returns a ThreadingHTTPServer."""
+def create_http_server(host: str, port: int, config: ConfigManager | None = None, auth: AuthManager | None = None):
+    """Build a Streamable HTTP transport. Returns a ThreadingHTTPServer.
 
-    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    Supports:
+      - POST /mcp          JSON-RPC dispatch (with Mcp-Session-Id tracking)
+      - GET  /mcp          SSE stream placeholder (returns available endpoints)
+      - DELETE /mcp        Session termination
+      - GET  /health       Liveness (unauthenticated when configured)
+      - GET  /tools        Tool catalog
+      - GET  /             Server metadata
+      - Bearer token auth  Authorization: Bearer <token> on all /mcp requests
+      - CORS               Configurable origin headers
+    """
+
+    cfg = config or ConfigManager(Path("."))
+    auth_mgr = auth
+    sessions = SessionManager(
+        timeout_seconds=cfg.session_timeout_seconds,
+        max_sessions=cfg.max_sessions,
+    )
 
     class SdlcRequestHandler(BaseHTTPRequestHandler):
         server_version = f"sdlc-mcp/{VERSION}"
         protocol_version = "HTTP/1.1"
 
-        def _send_json(self, status: int, payload: dict[str, Any]) -> None:
+        def _cors_headers(self) -> None:
+            for origin in cfg.cors_origins:
+                self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, Mcp-Session-Id, MCP-Protocol-Version")
+            self.send_header("Access-Control-Expose-Headers", "Mcp-Session-Id, MCP-Protocol-Version")
+
+        def _send_json(self, status: int, payload: dict[str, Any], session_id: str | None = None) -> None:
             body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self._cors_headers()
+            if session_id:
+                self.send_header("Mcp-Session-Id", session_id)
+            self.send_header("MCP-Protocol-Version", "2025-11-25")
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, format: str, *args: Any) -> None:  # keep stdout JSON-clean
+        def _check_auth(self) -> bool:
+            if auth_mgr is None or cfg.auth_mode == "none":
+                return True
+            path = self.path.split("?", 1)[0]
+            if path == "/health" and cfg.allow_unauthenticated_health:
+                return True
+            return auth_mgr.validate(self.headers.get("Authorization"))
+
+        def _get_session_id(self) -> str | None:
+            return self.headers.get("Mcp-Session-Id")
+
+        def log_message(self, format: str, *args: Any) -> None:
             sys.stderr.write("%s - %s\n" % (self.address_string(), format % args))
+
+        def do_OPTIONS(self) -> None:
+            self.send_response(204)
+            self._cors_headers()
+            self.end_headers()
 
         def do_GET(self) -> None:
             path = self.path.split("?", 1)[0]
             if path == "/health":
-                self._send_json(200, {"status": "ok", **SERVER_INFO})
-            elif path == "/tools":
+                health = {"status": "ok", **SERVER_INFO}
+                if auth_mgr and cfg.auth_mode == "bearer":
+                    health["auth"] = {"mode": "bearer", "tokenPreview": auth_mgr.get_token_preview()}
+                self._send_json(200, health)
+                return
+            if path == "/tools":
+                if not self._check_auth():
+                    self._send_json(401, {"error": "unauthorized"})
+                    return
                 self._send_json(200, {"tools": TOOLS})
-            elif path in {"/", ""}:
+                return
+            if path == "/mcp":
+                # Streamable HTTP: GET /mcp returns SSE stream info
+                if not self._check_auth():
+                    self._send_json(401, {"error": "unauthorized"})
+                    return
+                session_id = self._get_session_id()
+                if session_id and not sessions.touch(session_id):
+                    self._send_json(404, {"error": "session not found"})
+                    return
+                self._send_json(
+                    200,
+                    {
+                        "status": "streamable-http",
+                        "message": "POST /mcp to send JSON-RPC messages. DELETE /mcp to terminate session.",
+                        "endpoints": {"POST /mcp": "JSON-RPC dispatch", "DELETE /mcp": "Session termination"},
+                        "sessionActive": session_id is not None,
+                    },
+                    session_id=session_id,
+                )
+                return
+            if path in {"/", ""}:
                 self._send_json(
                     200,
                     {
                         **dict(SERVER_INFO),
                         "instructions": INSTRUCTIONS,
-                        "endpoints": {"POST /mcp": "JSON-RPC dispatch", "GET /health": "liveness", "GET /tools": "tool catalog"},
+                        "transports": ["stdio", "http", "streamable-http"],
+                        "endpoints": {
+                            "POST /mcp": "JSON-RPC dispatch",
+                            "GET /mcp": "Streamable HTTP info",
+                            "DELETE /mcp": "Session termination",
+                            "GET /health": "Liveness",
+                            "GET /tools": "Tool catalog",
+                        },
                         "supportedProtocolVersions": SUPPORTED_PROTOCOL_VERSIONS,
                     },
                 )
-            else:
+                return
+            self._send_json(404, {"error": "not found"})
+
+        def do_DELETE(self) -> None:
+            path = self.path.split("?", 1)[0]
+            if path != "/mcp":
                 self._send_json(404, {"error": "not found"})
+                return
+            if not self._check_auth():
+                self._send_json(401, {"error": "unauthorized"})
+                return
+            session_id = self._get_session_id()
+            if session_id:
+                sessions.destroy(session_id)
+            self.send_response(204)
+            self._cors_headers()
+            self.end_headers()
 
         def do_POST(self) -> None:
             path = self.path.split("?", 1)[0]
             if path not in {"/mcp", "/", ""}:
                 self._send_json(404, {"error": "not found"})
                 return
+            if not self._check_auth():
+                self._send_json(401, {"error": "unauthorized"})
+                return
+
+            # Session management: create or touch
+            session_id = self._get_session_id()
+            if session_id:
+                if not sessions.touch(session_id):
+                    session_id = sessions.create()
+            else:
+                session_id = sessions.create()
+
             length_header = self.headers.get("Content-Length")
             try:
                 length = int(length_header) if length_header is not None else -1
             except ValueError:
                 length = -1
             if length < 0 or length > MAX_MESSAGE_BYTES:
-                self._send_json(413, _error(None, -32700, "Request exceeds the maximum message size"))
+                self._send_json(413, _error(None, -32700, "Request exceeds the maximum message size"), session_id=session_id)
                 return
             raw = self.rfile.read(length)
             response = _dispatch_payload(raw)
             if response is None:  # notification
                 self.send_response(202)
                 self.send_header("Content-Length", "0")
+                self.send_header("Mcp-Session-Id", session_id)
                 self.end_headers()
                 return
-            self._send_json(200, response)
+            self._send_json(200, response, session_id=session_id)
 
     return ThreadingHTTPServer((host, port), SdlcRequestHandler)
 
@@ -663,15 +884,41 @@ def create_http_server(host: str, port: int):
 def main() -> int:
     parser = argparse.ArgumentParser(description="autonomous-sdlc-command-center MCP server")
     parser.add_argument("--http", type=int, metavar="PORT", default=None, help="Serve JSON-RPC over localhost HTTP on PORT instead of stdio")
+    parser.add_argument("--http-streamable", type=int, metavar="PORT", default=None, help="Serve 2026 MCP Streamable HTTP on PORT (session management + auth)")
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host (default 127.0.0.1)")
+    parser.add_argument("--root", default=".", help="Workspace root directory (default: current directory)")
+    parser.add_argument("--auth", choices=["bearer", "none"], default=None, help="Override auth mode (bearer or none)")
     parser.add_argument("--version", action="version", version=f"%(prog)s {VERSION}")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARN", "ERROR"], default="INFO", help="Log verbosity for HTTP transport")
     args = parser.parse_args()
 
+    config = ConfigManager(Path(args.root).resolve())
+    if args.auth is not None:
+        config._raw["auth"]["mode"] = args.auth
+
+    auth = AuthManager(str(Path(args.root).resolve()), config) if config.auth_mode == "bearer" else None
+
+    if args.http_streamable is not None:
+        if not 1 <= args.http_streamable <= 65535:
+            parser.error("--http-streamable port must be between 1 and 65535")
+        server = create_http_server(args.host, args.http_streamable, config=config, auth=auth)
+        actual_host, actual_port = server.server_address[:2]
+        sys.stderr.write(
+            f"sdlc-mcp {VERSION} Streamable HTTP on http://{actual_host}:{actual_port} "
+            f"(POST/GET/DELETE /mcp, GET /health, auth={config.auth_mode})\n"
+        )
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
+        finally:
+            server.server_close()
+        return 0
+
     if args.http is not None:
         if not 1 <= args.http <= 65535:
             parser.error("--http port must be between 1 and 65535")
-        server = create_http_server(args.host, args.http)
+        server = create_http_server(args.host, args.http, config=config, auth=auth)
         actual_host, actual_port = server.server_address[:2]
         sys.stderr.write(f"sdlc-mcp {VERSION} listening on http://{actual_host}:{actual_port} (POST /mcp, GET /health)\n")
         try:

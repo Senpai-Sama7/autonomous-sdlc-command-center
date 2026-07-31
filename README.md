@@ -31,6 +31,13 @@ The tool answers these questions about any software project:
 - **"Can I safely change a file?"** — Gated writes with backup, rollback, and audit trail
 - **"What changed recently?"** — Git history, churn hotspots, author activity
 
+### What's new in v1.3.0
+
+- **Streamable HTTP Transport** — 2026 MCP-compliant HTTP server with session management, CORS, and `DELETE /mcp` for session termination
+- **Bearer Token Authentication** — OAuth 2.0 Bearer token auth for remote HTTP deployments. Token auto-generated on first run, rotatable via CLI
+- **Configuration Engine** — `sdlc.config.json` for tunable security, mutation, auth, and HTTP settings with schema-validated defaults
+- **CLI `auth` and `config` commands** — `sdlc auth rotate/status/token` and `sdlc config show/init/validate`
+
 ---
 
 ## Getting started
@@ -232,6 +239,26 @@ See [UNIVERSAL_INSTALL.md](UNIVERSAL_INSTALL.md) for exact configuration example
 
 ## Configuration
 
+### Config file (`sdlc.config.json`)
+
+Create a config file to tune all settings:
+
+```bash
+sdlc config init     # Creates sdlc.config.json with defaults
+sdlc config show     # Display active configuration
+sdlc config validate # Check config file is valid
+```
+
+Key settings:
+
+| Section | Setting | Default | What it controls |
+|---|---|---|---|
+| `security` | `entropyThreshold` | `4.5` | Minimum Shannon entropy to flag a token |
+| `auth` | `mode` | `"bearer"` | `"bearer"` for token auth, `"none"` for local-only |
+| `http` | `sessionTimeoutSeconds` | `3600` | Streamable HTTP session expiry |
+| `mutations` | `maxFileSizeBytes` | `1048576` | Maximum write size (1 MiB) |
+| `rateLimiting` | `maxRequestsPerMinute` | `120` | Per-tool rate limit |
+
 ### Environment variables
 
 | Variable | Default | What it controls |
@@ -240,16 +267,36 @@ See [UNIVERSAL_INSTALL.md](UNIVERSAL_INSTALL.md) for exact configuration example
 | `SDLC_RATE_LIMIT_WINDOW_SECONDS` | `60` | Time window for rate limiting (seconds) |
 | `SDLC_ALLOW_NETWORK_PATHS` | (unset) | Set to `1` to allow scanning network/UNC paths |
 
+### Authentication
+
+The server generates a Bearer token on first startup (stored in `.sdlc/server.token`).
+
+```bash
+sdlc auth status   # Show auth config and token preview
+sdlc auth rotate   # Generate new token, archive old one
+sdlc auth token    # Print the raw token (for CI/CD)
+```
+
+For local-only use (no auth required):
+
+```bash
+sdlc serve --http 8765 --auth none
+```
+
 ### MCP server options
 
 ```bash
 # Run on stdio (default, for AI assistants)
 python3 mcp/sdlc_mcp_server.py
 
-# Run as HTTP server
+# Run as HTTP server (basic)
 python3 mcp/sdlc_mcp_server.py --http 8765
 
-# Custom host
+# Run as Streamable HTTP (2026 MCP standard, with sessions + auth)
+python3 mcp/sdlc_mcp_server.py --http-streamable 8765
+
+# Run without auth (local-only)
+python3 mcp/sdlc_mcp_server.py --http-streamable 8765 --auth none
 python3 mcp/sdlc_mcp_server.py --http 8765 --host 0.0.0.0
 ```
 
